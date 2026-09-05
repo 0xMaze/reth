@@ -3276,14 +3276,36 @@ async fn test_on_backfill_sync_finished_eth_retriggers_backfill_to_buffered_fina
 }
 
 #[test]
-fn applied_checkpoint_maps_zero_to_none() {
-    assert_eq!(applied_checkpoint(B256::ZERO, Some(BlockNumHash::new(1, B256::random()))), None);
+fn applied_checkpoint_preserves_effective_value_for_zero_hash() {
+    let tracked = BlockNumHash::new(1, B256::random());
+    assert_eq!(applied_checkpoint(B256::ZERO, Some(tracked)), Some(tracked));
+    assert_eq!(applied_checkpoint(B256::ZERO, None), None);
 }
 
 #[test]
 fn applied_checkpoint_uses_matching_tracked_reference() {
     let checkpoint = BlockNumHash::new(42, B256::random());
     assert_eq!(applied_checkpoint(checkpoint.hash, Some(checkpoint)), Some(checkpoint));
+}
+
+#[test]
+fn applied_forkchoice_uses_selected_hash_instead_of_physical_tip() {
+    let selected_ancestor = B256::random();
+    let tracked_safe = BlockNumHash::new(2, B256::random());
+    let tracked_finalized = BlockNumHash::new(1, B256::random());
+    let applied = applied_forkchoice(
+        ForkchoiceState {
+            head_block_hash: selected_ancestor,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        },
+        Some(tracked_safe),
+        Some(tracked_finalized),
+    );
+
+    assert_eq!(applied.head, selected_ancestor);
+    assert_eq!(applied.safe, Some(tracked_safe));
+    assert_eq!(applied.finalized, Some(tracked_finalized));
 }
 
 #[test]

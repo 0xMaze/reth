@@ -117,10 +117,29 @@ const CHANGESET_CACHE_RETENTION_BLOCKS: u64 = 64;
 #[inline]
 fn applied_checkpoint(requested_hash: B256, tracked: Option<BlockNumHash>) -> Option<BlockNumHash> {
     if requested_hash.is_zero() {
-        return None
+        // A zero hash means "do not update this checkpoint", not "clear it". Report the
+        // effective post-FCU view retained by the engine so observers and reconnect snapshots
+        // cannot disagree about safe/finalized state.
+        return tracked
     }
 
     tracked.filter(|checkpoint| checkpoint.hash == requested_hash)
+}
+
+#[inline]
+fn applied_forkchoice(
+    state: ForkchoiceState,
+    tracked_safe: Option<BlockNumHash>,
+    tracked_finalized: Option<BlockNumHash>,
+) -> AppliedForkchoice {
+    AppliedForkchoice {
+        // A valid Ethereum FCU may deliberately select a canonical ancestor for the next payload
+        // build without unwinding Reth's physical canonical tip. The requested hash is therefore
+        // the authoritative selected head; observers resolve its metadata off the engine hot path.
+        head: state.head_block_hash,
+        safe: applied_checkpoint(state.safe_block_hash, tracked_safe),
+        finalized: applied_checkpoint(state.finalized_block_hash, tracked_finalized),
+    }
 }
 
 /// A builder for creating state providers that can be used across threads.
@@ -1284,6 +1303,18 @@ where
         self.handle_missing_block(state)
     }
 
+    /// Notifies observers of the effective forkchoice state after Reth has applied it.
+    fn notify_forkchoice_applied(&self, state: ForkchoiceState) {
+        self.payload_validator.on_forkchoice_applied(
+            applied_forkchoice(
+                state,
+                self.canonical_in_memory_state.get_safe_num_hash(),
+                self.canonical_in_memory_state.get_finalized_num_hash(),
+            ),
+            &self.state,
+        );
+    }
+
     /// Records metrics for forkchoice updated calls
     fn record_forkchoice_metrics(&self) {
         self.canonical_in_memory_state.on_forkchoice_update_received();
@@ -1804,24 +1835,7 @@ where
                                     ));
 
                                     if forkchoice_status.is_valid() {
-                                        let head = *self.state.tree_state.canonical_head();
-                                        debug_assert_eq!(head.hash, state.head_block_hash);
-                                        self.payload_validator.on_forkchoice_applied(
-                                            AppliedForkchoice {
-                                                head,
-                                                safe: applied_checkpoint(
-                                                    state.safe_block_hash,
-                                                    self.canonical_in_memory_state
-                                                        .get_safe_num_hash(),
-                                                ),
-                                                finalized: applied_checkpoint(
-                                                    state.finalized_block_hash,
-                                                    self.canonical_in_memory_state
-                                                        .get_finalized_num_hash(),
-                                                ),
-                                            },
-                                            &self.state,
-                                        );
+                                        self.notify_forkchoice_applied(state);
                                     }
 
                                     // handle the event if any
@@ -2067,6 +2081,7 @@ where
             let new_head_hash = new_head.hash();
             self.canonical_in_memory_state.set_canonical_head(new_head);
             self.payload_validator.on_canonical_head_changed(new_head_hash, &self.state);
+            self.payload_validator.on_canonical_state_reset(backfill_num_hash, &self.state);
         }
 
         // check if we need to run backfill again by comparing the most recent backfill target
@@ -2184,6 +2199,7 @@ where
         }
 
         self.state.forkchoice_state_tracker.promote_sync_target_to_valid(sync_target_state);
+        self.notify_forkchoice_applied(sync_target_state);
     }
 
     /// Convenience function to handle an optional tree event.

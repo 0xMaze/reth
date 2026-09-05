@@ -1796,6 +1796,13 @@ pub trait EngineValidator<
     ) {
     }
 
+    /// Notifies the validator after an internal sync/backfill operation resets canonical state.
+    ///
+    /// This transition is not paired with an applied Engine API forkchoice update. Observers that
+    /// maintain an external canonical projection should re-anchor it from the provider instead of
+    /// waiting for [`Self::on_forkchoice_applied`].
+    fn on_canonical_state_reset(&self, _head: BlockNumHash, _state: &EngineApiTreeState<N>) {}
+
     /// Prepares the resources loaned to a payload builder job.
     ///
     /// `timestamp` is taken from the payload attributes.
@@ -1811,11 +1818,17 @@ pub trait EngineValidator<
 /// Block references selected by a successfully applied forkchoice update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppliedForkchoice {
-    /// Canonical head selected by the update.
-    pub head: BlockNumHash,
-    /// Safe checkpoint selected by the update, or `None` when the Engine API hash was zero.
+    /// Head selected by the update.
+    ///
+    /// This is a hash rather than [`BlockNumHash`] because a valid FCU can select a canonical
+    /// ancestor without changing Reth's physical canonical tip. Observers can resolve metadata
+    /// outside the Engine API hot path when they need it.
+    pub head: B256,
+    /// Effective safe checkpoint after the update, including a previously retained checkpoint
+    /// when the Engine API hash was zero.
     pub safe: Option<BlockNumHash>,
-    /// Finalized checkpoint selected by the update, or `None` when the Engine API hash was zero.
+    /// Effective finalized checkpoint after the update, including a previously retained checkpoint
+    /// when the Engine API hash was zero.
     pub finalized: Option<BlockNumHash>,
 }
 
