@@ -1101,7 +1101,7 @@ where
                 "FCU unwind detected: reverting to canonical ancestor"
             );
 
-            self.handle_canonical_chain_unwind(current_head_number, canonical_header)
+            self.handle_canonical_chain_unwind(current_head_number, canonical_header)?;
         } else {
             debug!(
                 target: "engine::tree",
@@ -1110,8 +1110,11 @@ where
                 new_head_hash = ?new_head_hash,
                 "Advancing latest block to canonical ancestor"
             );
-            self.handle_chain_advance_or_same_height(canonical_header)
+            self.handle_chain_advance_or_same_height(canonical_header)?;
         }
+
+        self.payload_validator.on_canonical_head_changed(new_head_hash, &self.state);
+        Ok(())
     }
 
     /// Handles chain unwind scenarios by collecting blocks to remove and performing an unwind back
@@ -2030,7 +2033,9 @@ where
             self.persistence_state.finish(new_head.num_hash(), new_head.num_hash());
 
             // update the tracked canonical head
+            let new_head_hash = new_head.hash();
             self.canonical_in_memory_state.set_canonical_head(new_head);
+            self.payload_validator.on_canonical_head_changed(new_head_hash, &self.state);
         }
 
         // check if we need to run backfill again by comparing the most recent backfill target
