@@ -1783,9 +1783,10 @@ pub trait EngineValidator<
     /// Notifies the validator after a forkchoice update was successfully applied.
     ///
     /// Unlike [`Self::on_canonical_head_changed`], this fires for every applied `VALID`
-    /// forkchoice update, including one that reaffirms the current head. `safe` and `finalized`
-    /// are the already-verified checkpoints selected by the update, so implementations must not
-    /// perform provider reads to reconstruct them.
+    /// forkchoice update, including one that reaffirms the current head. The selected head hash
+    /// and effective, already-verified `safe` and `finalized` checkpoints are supplied directly,
+    /// so implementations must not perform provider reads on the engine thread to reconstruct
+    /// them.
     ///
     /// The callback is deliberately infallible: auxiliary observers must not change the Engine
     /// API response.
