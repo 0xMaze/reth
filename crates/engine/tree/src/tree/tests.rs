@@ -2,11 +2,14 @@ use super::*;
 use crate::{
     persistence::PersistenceAction,
     tree::{
-        payload_validator::{BasicEngineValidator, TreeCtx, ValidationOutcome},
+        payload_validator::{
+            BasicEngineValidator, ExecutedBlockInfo, ExecutionObserver, TreeCtx, ValidationOutcome,
+        },
         persistence_state::CurrentPersistenceAction,
         PersistTarget, TreeConfig,
     },
 };
+use reth_stages_api::{StageCheckpoint, StageId};
 use reth_storage_overlay::OverlayManager;
 
 use alloy_eips::eip1898::BlockWithParent;
@@ -21,15 +24,17 @@ use alloy_rpc_types_engine::{
 };
 use assert_matches::assert_matches;
 use reth_chain_state::{test_utils::TestBlockBuilder, BlockState};
-use reth_chainspec::{ChainSpec, HOLESKY, MAINNET};
+use reth_chainspec::{ChainSpec, ChainSpecBuilder, EthChainSpec, HOLESKY, MAINNET};
 use reth_engine_primitives::{EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook};
 use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_engine_primitives::{EthEngineTypes, EthPayloadAttributes};
 use reth_ethereum_primitives::{Block, EthPrimitives};
-use reth_evm_ethereum::MockEvmConfig;
+use reth_evm_ethereum::{EthEvmConfig, MockEvmConfig};
 use reth_payload_builder::PayloadServiceCommand;
 use reth_primitives_traits::Block as _;
-use reth_provider::{test_utils::MockEthProvider, BalStoreHandle, InMemoryBalStore, RawBal};
+use reth_provider::{
+    test_utils::MockEthProvider, BalStoreHandle, BlockExecutionOutput, InMemoryBalStore, RawBal,
+};
 use reth_tasks::spawn_os_thread;
 use reth_trie_common::ComputedTrieData;
 use std::{
@@ -37,7 +42,7 @@ use std::{
     str::FromStr,
     sync::{
         mpsc::{Receiver, Sender},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -485,6 +490,23 @@ impl ValidatorTestHarness {
     /// Get validation metrics for testing
     fn validation_call_count(&self) -> usize {
         self.metrics.total_calls()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingExecutionObserver {
+    observations: Mutex<Vec<ExecutedBlockInfo>>,
+}
+
+impl ExecutionObserver<EthPrimitives> for RecordingExecutionObserver {
+    fn on_executed(
+        &self,
+        block: ExecutedBlockInfo,
+        _output: &BlockExecutionOutput<
+            <EthPrimitives as reth_primitives_traits::NodePrimitives>::Receipt,
+        >,
+    ) {
+        self.observations.lock().expect("observer mutex poisoned").push(block);
     }
 }
 
@@ -2106,6 +2128,63 @@ fn test_validate_block_multiple_scenarios() {
         total_calls >= 2,
         "At least invalid block validations should have executed (got {})",
         total_calls
+    );
+}
+
+/// The execution hook precedes state-root validation, so consumers can observe the lowest-latency
+/// state even when a later validation phase rejects the block.
+#[test]
+fn test_execution_observer_fires_before_state_root_rejection() {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(ChainSpecBuilder::mainnet().paris_activated().build());
+    let observer = Arc::new(RecordingExecutionObserver::default());
+    let blocks = TestBlockBuilder::eth()
+        .with_chain_spec(chain_spec.as_ref().clone())
+        .get_executed_blocks(0..1)
+        .collect();
+    let mut test_harness = TestHarness::new(chain_spec.clone()).with_blocks(blocks);
+    test_harness.provider.enable_database_provider();
+    test_harness.provider.add_stage_checkpoint(StageId::Finish, StageCheckpoint::new(0));
+    let consensus = Arc::new(EthBeaconConsensus::new(chain_spec.clone()));
+    let evm_config = EthEvmConfig::new(chain_spec.clone());
+    let overlay_manager = test_harness.tree.state.tree_state.overlay_manager.clone();
+    let mut validator = BasicEngineValidator::new(
+        test_harness.provider.clone(),
+        consensus,
+        evm_config,
+        MockEngineValidator,
+        TreeConfig::default().with_has_enough_parallelism(false),
+        Box::new(NoopInvalidBlockHook::default()),
+        overlay_manager,
+        reth_tasks::Runtime::test(),
+    )
+    .with_execution_observer(observer.clone());
+    let mut block_factory = TestBlockFactory::new(chain_spec.as_ref().clone());
+    let parent = test_harness.blocks.last().expect("observer harness has a parent block");
+    let parent_hash = parent.recovered_block().hash();
+    let mut block = block_factory.create_invalid_consensus_block(parent_hash).unseal();
+    block.body.transactions.clear();
+    block.header.transactions_root = alloy_consensus::EMPTY_ROOT_HASH;
+    block.header.receipts_root = alloy_consensus::EMPTY_ROOT_HASH;
+    block.header.gas_used = 0;
+    block.header.base_fee_per_gas =
+        chain_spec.next_block_base_fee(parent.recovered_block().header(), block.header.timestamp);
+    let block = block.seal_slow();
+    let expected = ExecutedBlockInfo::new(block.block_with_parent(), block.timestamp());
+
+    let ctx =
+        TreeCtx::new(&mut test_harness.tree.state, &test_harness.tree.canonical_in_memory_state);
+    let result = validator.validate_block(block, ctx);
+
+    assert!(
+        format!("{result:?}").contains("BodyStateRootDiff"),
+        "expected state-root rejection, got {result:?}"
+    );
+    assert_eq!(
+        observer.observations.lock().expect("observer mutex poisoned").as_slice(),
+        &[expected],
+        "validation outcome: {result:?}"
     );
 }
 

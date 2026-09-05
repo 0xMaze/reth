@@ -295,6 +295,9 @@ where
     /// None if txpool prewarming is disabled.
     #[debug(skip)]
     txpool_prewarm: Option<txpool_prewarm::Handle<Evm::Primitives, P, Evm>>,
+    /// Optional observer notified immediately after successful EVM execution.
+    #[debug(skip)]
+    execution_observer: Option<Arc<dyn ExecutionObserver<Evm::Primitives>>>,
 }
 
 impl<N, P, Evm, V> BasicEngineValidator<P, Evm, V>
@@ -354,6 +357,7 @@ where
             overlay_manager,
             state_root_strategy: Arc::new(DefaultStateRootStrategy::default()),
             txpool_prewarm: None,
+            execution_observer: None,
         }
     }
 
@@ -376,6 +380,16 @@ where
             Arc::new(source),
             self.evm_config.clone(),
         ));
+        self
+    }
+
+    /// Installs an observer that is called synchronously immediately after successful EVM
+    /// execution, before post-execution consensus and state-root validation.
+    ///
+    /// The observer receives the complete execution output by reference. Implementations should
+    /// keep this callback non-blocking because it runs on the payload-validation hot path.
+    pub fn with_execution_observer(mut self, observer: Arc<dyn ExecutionObserver<N>>) -> Self {
+        self.execution_observer = Some(observer);
         self
     }
 
@@ -729,6 +743,13 @@ where
             metrics.record_totals(stats);
         }
         let (output, senders, receipt_root_rx, built_bal) = ensure_ok!(execution_result);
+
+        if let Some(observer) = &self.execution_observer {
+            observer.on_executed(
+                ExecutedBlockInfo::new(input.block_with_parent(), input.timestamp()),
+                &output,
+            );
+        }
 
         // After executing the block we can stop prewarming transactions
         handle.stop_prewarming_execution();
@@ -1954,6 +1975,32 @@ where
     }
 }
 
+/// Metadata for a block whose EVM execution completed successfully.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutedBlockInfo {
+    /// Block number and hash together with its parent hash.
+    pub block: BlockWithParent,
+    /// Block timestamp in seconds since the Unix epoch.
+    pub timestamp: u64,
+}
+
+impl ExecutedBlockInfo {
+    /// Creates executed-block metadata.
+    pub const fn new(block: BlockWithParent, timestamp: u64) -> Self {
+        Self { block, timestamp }
+    }
+}
+
+/// Synchronous notification hook for successful EVM execution.
+///
+/// This fires before post-execution consensus checks and state-root validation. Receiving this
+/// notification therefore does not imply that the block is valid or canonical. The callback is
+/// deliberately infallible: auxiliary observers must not change payload-validation results.
+pub trait ExecutionObserver<N: NodePrimitives>: Send + Sync + 'static {
+    /// Observes a complete execution output without taking ownership or cloning its bundle state.
+    fn on_executed(&self, block: ExecutedBlockInfo, output: &BlockExecutionOutput<N::Receipt>);
+}
+
 /// Enum representing either block or payload being validated.
 #[derive(Debug, Clone)]
 pub enum BlockOrPayload<T: PayloadTypes> {
@@ -1985,6 +2032,14 @@ impl<T: PayloadTypes> BlockOrPayload<T> {
         match self {
             Self::Payload(payload) => payload.parent_hash(),
             Self::Block(block) => block.parent_hash(),
+        }
+    }
+
+    /// Returns the block timestamp in seconds since the Unix epoch.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::Payload(payload) => payload.timestamp(),
+            Self::Block(block) => block.timestamp(),
         }
     }
 
