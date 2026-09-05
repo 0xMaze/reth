@@ -81,7 +81,7 @@ pub use invalid_headers::InvalidHeaderCache;
 pub use metrics::EngineApiMetrics;
 pub use payload_processor::*;
 pub use payload_validator::{
-    BasicEngineValidator, EngineValidator, ExecutedBlockInfo, ExecutionObserver,
+    AppliedForkchoice, BasicEngineValidator, EngineValidator, ExecutedBlockInfo, ExecutionObserver,
 };
 pub use persistence_state::PersistenceState;
 pub use reth_engine_primitives::TreeConfig;
@@ -113,6 +113,15 @@ pub(crate) const MIN_BLOCKS_FOR_PIPELINE_RUN: u64 = EPOCH_SLOTS;
 /// This ensures that recent changesets are kept in memory for potential reorgs,
 /// even when the finalized block is not set (e.g., on L2s like Optimism).
 const CHANGESET_CACHE_RETENTION_BLOCKS: u64 = 64;
+
+#[inline]
+fn applied_checkpoint(requested_hash: B256, tracked: Option<BlockNumHash>) -> Option<BlockNumHash> {
+    if requested_hash.is_zero() {
+        return None
+    }
+
+    tracked.filter(|checkpoint| checkpoint.hash == requested_hash)
+}
 
 /// A builder for creating state providers that can be used across threads.
 #[derive(Clone, Debug)]
@@ -1782,16 +1791,38 @@ where
                                 let mut output = self.on_forkchoice_updated(state, payload_attrs);
 
                                 if let Ok(res) = &mut output {
+                                    let forkchoice_status = res.outcome.forkchoice_status();
                                     // track last received forkchoice state
                                     self.state
                                         .forkchoice_state_tracker
-                                        .set_latest(state, res.outcome.forkchoice_status());
+                                        .set_latest(state, forkchoice_status);
 
                                     // emit an event about the handled FCU
                                     self.emit_event(ConsensusEngineEvent::ForkchoiceUpdated(
                                         state,
-                                        res.outcome.forkchoice_status(),
+                                        forkchoice_status,
                                     ));
+
+                                    if forkchoice_status.is_valid() {
+                                        let head = *self.state.tree_state.canonical_head();
+                                        debug_assert_eq!(head.hash, state.head_block_hash);
+                                        self.payload_validator.on_forkchoice_applied(
+                                            AppliedForkchoice {
+                                                head,
+                                                safe: applied_checkpoint(
+                                                    state.safe_block_hash,
+                                                    self.canonical_in_memory_state
+                                                        .get_safe_num_hash(),
+                                                ),
+                                                finalized: applied_checkpoint(
+                                                    state.finalized_block_hash,
+                                                    self.canonical_in_memory_state
+                                                        .get_finalized_num_hash(),
+                                                ),
+                                            },
+                                            &self.state,
+                                        );
+                                    }
 
                                     // handle the event if any
                                     self.on_maybe_tree_event(res.event.take())?;

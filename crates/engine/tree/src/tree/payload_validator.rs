@@ -107,7 +107,7 @@ use crate::tree::{
 };
 use alloy_consensus::transaction::{Either, TxHashRef};
 use alloy_eip7928::{bal::DecodedBal, compute_block_access_list_hash, BlockAccessList};
-use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, NumHash};
+use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, BlockNumHash, NumHash};
 use alloy_evm::Evm;
 use alloy_primitives::{
     map::{AddressMap, B256Set},
@@ -1780,6 +1780,22 @@ pub trait EngineValidator<
     /// This may also be called when a forkchoice update reaffirms the existing head.
     fn on_canonical_head_changed(&self, _hash: B256, _state: &EngineApiTreeState<N>) {}
 
+    /// Notifies the validator after a forkchoice update was successfully applied.
+    ///
+    /// Unlike [`Self::on_canonical_head_changed`], this fires for every applied `VALID`
+    /// forkchoice update, including one that reaffirms the current head. `safe` and `finalized`
+    /// are the already-verified checkpoints selected by the update, so implementations must not
+    /// perform provider reads to reconstruct them.
+    ///
+    /// The callback is deliberately infallible: auxiliary observers must not change the Engine
+    /// API response.
+    fn on_forkchoice_applied(
+        &self,
+        _forkchoice: AppliedForkchoice,
+        _state: &EngineApiTreeState<N>,
+    ) {
+    }
+
     /// Prepares the resources loaned to a payload builder job.
     ///
     /// `timestamp` is taken from the payload attributes.
@@ -1790,6 +1806,17 @@ pub trait EngineValidator<
         timestamp: u64,
         state: &mut EngineApiTreeState<N>,
     ) -> PayloadBuilderResources;
+}
+
+/// Block references selected by a successfully applied forkchoice update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedForkchoice {
+    /// Canonical head selected by the update.
+    pub head: BlockNumHash,
+    /// Safe checkpoint selected by the update, or `None` when the Engine API hash was zero.
+    pub safe: Option<BlockNumHash>,
+    /// Finalized checkpoint selected by the update, or `None` when the Engine API hash was zero.
+    pub finalized: Option<BlockNumHash>,
 }
 
 impl<N, Types, P, Evm, V> EngineValidator<Types> for BasicEngineValidator<P, Evm, V>

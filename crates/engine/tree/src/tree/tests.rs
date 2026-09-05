@@ -3274,3 +3274,22 @@ async fn test_on_backfill_sync_finished_opstack_retriggers_backfill_to_buffered_
 async fn test_on_backfill_sync_finished_eth_retriggers_backfill_to_buffered_finalized() {
     assert_post_backfill_recheck_retriggers_to_buffered_target(EngineApiKind::Ethereum).await;
 }
+
+#[test]
+fn applied_checkpoint_maps_zero_to_none() {
+    assert_eq!(applied_checkpoint(B256::ZERO, Some(BlockNumHash::new(1, B256::random()))), None);
+}
+
+#[test]
+fn applied_checkpoint_uses_matching_tracked_reference() {
+    let checkpoint = BlockNumHash::new(42, B256::random());
+    assert_eq!(applied_checkpoint(checkpoint.hash, Some(checkpoint)), Some(checkpoint));
+}
+
+#[test]
+fn applied_checkpoint_rejects_stale_tracked_reference() {
+    assert_eq!(
+        applied_checkpoint(B256::random(), Some(BlockNumHash::new(42, B256::random()))),
+        None
+    );
+}
